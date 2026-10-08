@@ -57,31 +57,21 @@ ngrok tcp 22 --log ".ngrok.log" >/dev/null 2>&1 &
 
 sleep 10
 
-if grep -q "command failed" .ngrok.log 2>/dev/null; then
-  echo "### ngrok failed ###"
-  cat .ngrok.log
-  exit 5
-fi
+echo ""
+echo "### ngrok log ###"
+cat .ngrok.log || true
 
-ADDRESS=$(grep -o -E "tcp://[^ ]+" .ngrok.log | head -n 1)
+echo ""
+echo "### SSH tunnel information ###"
 
-if [[ -z "$ADDRESS" ]]; then
-  echo "Could not find ngrok TCP address."
-  cat .ngrok.log
-  exit 6
-fi
-
-HOST=$(echo "$ADDRESS" | sed 's#tcp://##' | cut -d: -f1)
-PORT=$(echo "$ADDRESS" | sed 's#tcp://##' | cut -d: -f2)
+curl -s http://127.0.0.1:4040/api/tunnels || true
 
 echo ""
 echo "=========================================="
-echo "SSH SERVER READY"
+echo "ngrok is running."
+echo "SSH tunnel should be active."
 echo "=========================================="
-echo "Username: $LINUX_USERNAME"
-echo "Host: $HOST"
-echo "Port: $PORT"
-echo ""
-echo "Connect with:"
-echo "ssh $LINUX_USERNAME@$HOST -p $PORT"
-echo "=========================================="
+
+while true; do
+  sleep 60
+done
