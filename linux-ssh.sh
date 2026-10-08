@@ -1,12 +1,6 @@
-#linux-run.sh LINUX_USER_PASSWORD NGROK_AUTH_TOKEN LINUX_USERNAME LINUX_MACHINE_NAME
 #!/bin/bash
-# /home/runner/.ngrok2/ngrok.yml
 
-sudo useradd -m $LINUX_USERNAME
-sudo adduser $LINUX_USERNAME sudo
-echo "$LINUX_USERNAME:$LINUX_USER_PASSWORD" | sudo chpasswd
-sed -i 's/\/bin\/sh/\/bin\/bash/g' /etc/passwd
-sudo hostname $LINUX_MACHINE_NAME
+set -e
 
 if [[ -z "$NGROK_AUTH_TOKEN" ]]; then
   echo "Please set 'NGROK_AUTH_TOKEN'"
@@ -14,36 +8,80 @@ if [[ -z "$NGROK_AUTH_TOKEN" ]]; then
 fi
 
 if [[ -z "$LINUX_USER_PASSWORD" ]]; then
-  echo "Please set 'LINUX_USER_PASSWORD' for user: $USER"
+  echo "Please set 'LINUX_USER_PASSWORD'"
   exit 3
 fi
 
-echo "### Install ngrok ###"
-
-wget -q https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-386.zip
-unzip ngrok-stable-linux-386.zip
-chmod +x ./ngrok
-
-echo "### Update user: $USER password ###"
-echo -e "$LINUX_USER_PASSWORD\n$LINUX_USER_PASSWORD" | sudo passwd "$USER"
-
-echo "### Start ngrok proxy for 22 port ###"
-
-
-rm -f .ngrok.log
-./ngrok authtoken "$NGROK_AUTH_TOKEN"
-./ngrok tcp 22 --log ".ngrok.log" &
-
-sleep 10
-HAS_ERRORS=$(grep "command failed" < .ngrok.log)
-
-if [[ -z "$HAS_ERRORS" ]]; then
-  echo ""
-  echo "=========================================="
-  echo "To connect: $(grep -o -E "tcp://(.+)" < .ngrok.log | sed "s/tcp:\/\//ssh $USER@/" | sed "s/:/ -p /")"
-  echo "or conenct with $(grep -o -E "tcp://(.+)" < .ngrok.log | sed "s/tcp:\/\//ssh (Your Linux Username)@/" | sed "s/:/ -p /")"
-  echo "=========================================="
-else
-  echo "$HAS_ERRORS"
+if [[ -z "$LINUX_USERNAME" ]]; then
+  echo "Please set 'LINUX_USERNAME'"
   exit 4
 fi
+
+echo "### Create user ###"
+
+if ! id "$LINUX_USERNAME" >/dev/null 2>&1; then
+  sudo useradd -m -s /bin/bash "$LINUX_USERNAME"
+fi
+
+sudo adduser "$LINUX_USERNAME" sudo || true
+echo "$LINUX_USERNAME:$LINUX_USER_PASSWORD" | sudo chpasswd
+
+echo "### Configure shell ###"
+
+sudo sed -i 's#/bin/sh#/bin/bash#g' /etc/passwd
+
+echo "### Set hostname ###"
+
+sudo hostname "$LINUX_MACHINE_NAME"
+
+echo "### Install ngrok v3 ###"
+
+curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+  | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+
+echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+  | sudo tee /etc/apt/sources.list.d/ngrok.list >/dev/null
+
+sudo apt-get update
+sudo apt-get install -y ngrok
+
+echo "### Configure ngrok ###"
+
+ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
+
+echo "### Start ngrok TCP proxy for SSH ###"
+
+rm -f .ngrok.log
+
+ngrok tcp 22 --log ".ngrok.log" >/dev/null 2>&1 &
+
+sleep 10
+
+if grep -q "command failed" .ngrok.log 2>/dev/null; then
+  echo "### ngrok failed ###"
+  cat .ngrok.log
+  exit 5
+fi
+
+ADDRESS=$(grep -o -E "tcp://[^ ]+" .ngrok.log | head -n 1)
+
+if [[ -z "$ADDRESS" ]]; then
+  echo "Could not find ngrok TCP address."
+  cat .ngrok.log
+  exit 6
+fi
+
+HOST=$(echo "$ADDRESS" | sed 's#tcp://##' | cut -d: -f1)
+PORT=$(echo "$ADDRESS" | sed 's#tcp://##' | cut -d: -f2)
+
+echo ""
+echo "=========================================="
+echo "SSH SERVER READY"
+echo "=========================================="
+echo "Username: $LINUX_USERNAME"
+echo "Host: $HOST"
+echo "Port: $PORT"
+echo ""
+echo "Connect with:"
+echo "ssh $LINUX_USERNAME@$HOST -p $PORT"
+echo "=========================================="
