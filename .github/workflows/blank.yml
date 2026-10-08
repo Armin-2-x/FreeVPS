@@ -13,7 +13,7 @@ jobs:
         shell: powershell
         run: |
           Write-Host "=========================================="
-          Write-Host "Windows VPS Runner"
+          Write-Host "Windows VPS + Tailscale"
           Write-Host "=========================================="
 
           $username = "${{ secrets.LINUX_USERNAME }}"
@@ -29,6 +29,13 @@ jobs:
             exit 1
           }
 
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.TS_AUTHKEY }}")) {
+            Write-Error "TS_AUTHKEY secret is missing"
+            exit 1
+          }
+
+          Write-Host "### Creating Windows user ###"
+
           $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
@@ -39,7 +46,12 @@ jobs:
               -AccountNeverExpires
           }
 
-          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $username `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "### Enabling RDP ###"
 
           Set-ItemProperty `
             -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
@@ -51,12 +63,55 @@ jobs:
           Set-Service -Name TermService -StartupType Automatic
           Start-Service -Name TermService
 
+          Write-Host "### Installing Tailscale ###"
+
+          $installer = "$env:TEMP\tailscale-setup.exe"
+
+          Invoke-WebRequest `
+            -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" `
+            -OutFile $installer
+
+          Start-Process `
+            -FilePath $installer `
+            -ArgumentList "/quiet" `
+            -Wait
+
+          $tailscale = "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $tailscale)) {
+            $tailscale = "${env:ProgramFiles}\Tailscale\tailscale.exe"
+          }
+
+          if (-not (Test-Path $tailscale)) {
+            Write-Error "Tailscale installation failed"
+            exit 2
+          }
+
+          Write-Host "### Connecting Tailscale ###"
+
+          & $tailscale up `
+            --auth-key="${{ secrets.TS_AUTHKEY }}" `
+            --hostname="github-windows-vps"
+
+          Start-Sleep -Seconds 5
+
+          Write-Host "### Tailscale status ###"
+          & $tailscale status
+
+          Write-Host "### Tailscale IP ###"
+
+          $ip = & $tailscale ip -4
+
+          Write-Host "Tailscale IPv4: $ip"
+
           Write-Host ""
-          Write-Host "Windows VPS is ready."
+          Write-Host "=========================================="
+          Write-Host "WINDOWS VPS READY"
+          Write-Host "=========================================="
           Write-Host "Username: $username"
-          Write-Host ""
-          Write-Host "The GitHub Actions runner is temporary."
-          Write-Host "Keeping the job alive..."
+          Write-Host "Tailscale IPv4: $ip"
+          Write-Host "RDP port: 3389"
+          Write-Host "=========================================="
 
           while ($true) {
             Start-Sleep -Seconds 60
