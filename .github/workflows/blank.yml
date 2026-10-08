@@ -1,29 +1,63 @@
-name: Ubuntu ssh Virtual Machine
-on: 
+name: Windows VPS
+
+on:
   workflow_dispatch:
-defaults:
-  run:
-    shell: bash
-    
-    
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    timeout-minutes: 350
+
     steps:
-    - uses: actions/checkout@v3.5.2
-#    - name: If failed, means ok
-#      run: ./not-exist-file.sh it bloke build
-    - name: Preparing Linux Environment
-      run: sudo apt-get update
-    - name: Setting Up the Ubuntu Environment
-    #  if: ${{ failure() }}
-      run: bash linux-ssh.sh
-      env:
-        LINUX_USER_PASSWORD: ${{ secrets.LINUX_USER_PASSWORD }}
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-        CHROME_HEADLESS_CODE: ${{ secrets.CHROME_HEADLESS_CODE }}
-        LINUX_MACHINE_NAME: ${{ secrets.LINUX_MACHINE_NAME }}
-        LINUX_USERNAME: ${{ secrets.LINUX_USERNAME }}
-    - name: Keep Running Ubuntu System and keepAlive
-     # if: ${{ failure() }}
-      run: sleep 6h
+      - name: Setup Windows VPS
+        shell: powershell
+        run: |
+          Write-Host "=========================================="
+          Write-Host "Windows VPS Runner"
+          Write-Host "=========================================="
+
+          $username = "${{ secrets.LINUX_USERNAME }}"
+          $password = "${{ secrets.LINUX_USER_PASSWORD }}"
+
+          if ([string]::IsNullOrWhiteSpace($username)) {
+            Write-Error "LINUX_USERNAME secret is missing"
+            exit 1
+          }
+
+          if ([string]::IsNullOrWhiteSpace($password)) {
+            Write-Error "LINUX_USER_PASSWORD secret is missing"
+            exit 1
+          }
+
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+            New-LocalUser `
+              -Name $username `
+              -Password $securePassword `
+              -PasswordNeverExpires `
+              -AccountNeverExpires
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
+
+          Write-Host ""
+          Write-Host "Windows VPS is ready."
+          Write-Host "Username: $username"
+          Write-Host ""
+          Write-Host "The GitHub Actions runner is temporary."
+          Write-Host "Keeping the job alive..."
+
+          while ($true) {
+            Start-Sleep -Seconds 60
+          }
