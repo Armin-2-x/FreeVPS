@@ -1,7 +1,11 @@
+
 name: Windows VPS
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -11,47 +15,84 @@ jobs:
     steps:
       - name: Setup Windows VPS
         shell: powershell
+        env:
+          VPS_USERNAME: ${{ secrets.LINUX_USERNAME }}
+          VPS_PASSWORD: ${{ secrets.LINUX_USER_PASSWORD }}
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
         run: |
-          Write-Host "=========================================="
-          Write-Host "Windows VPS + Tailscale"
-          Write-Host "=========================================="
+          $ErrorActionPreference = "Stop"
 
-          $username = "${{ secrets.LINUX_USERNAME }}"
-          $password = "${{ secrets.LINUX_USER_PASSWORD }}"
+          Write-Host "=== Windows VPS Setup ==="
+
+          $username = $env:VPS_USERNAME
+          $password = $env:VPS_PASSWORD
+          $authKey = $env:TS_AUTHKEY
 
           if ([string]::IsNullOrWhiteSpace($username)) {
-            Write-Error "LINUX_USERNAME secret is missing"
-            exit 1
+            throw "Missing LINUX_USERNAME secret."
           }
 
           if ([string]::IsNullOrWhiteSpace($password)) {
-            Write-Error "LINUX_USER_PASSWORD secret is missing"
-            exit 1
+            throw "Missing LINUX_USER_PASSWORD secret."
           }
 
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.TS_AUTHKEY }}")) {
-            Write-Error "TS_AUTHKEY secret is missing"
-            exit 1
+          if ([string]::IsNullOrWhiteSpace($authKey)) {
+            throw "Missing TS_AUTHKEY secret."
           }
 
-          Write-Host "### Creating Windows user ###"
+          if ($username -match '[\\/:*?"<>|]') {
+            throw "Invalid username format."
+          }
 
-          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+          if ($password.Length -lt 8) {
+            throw "Password is too short."
+          }
 
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-            New-LocalUser `
+          if ($password -match [regex]::Escape($username)) {
+            throw "Password must not contain the username."
+          }
+
+          Write-Host "Password length: $($password.Length)"
+          Write-Host "Preparing local Windows account..."
+
+          $securePassword = ConvertTo-SecureString `
+            -String $password `
+            -AsPlainText `
+            -Force
+
+          try {
+            $user = Get-LocalUser `
               -Name $username `
-              -Password $securePassword `
-              -PasswordNeverExpires `
-              -AccountNeverExpires
+              -ErrorAction SilentlyContinue
+
+            if ($null -eq $user) {
+              New-LocalUser `
+                -Name $username `
+                -Password $securePassword `
+                -PasswordNeverExpires `
+                -AccountNeverExpires `
+                -ErrorAction Stop | Out-Null
+            }
+            else {
+              Set-LocalUser `
+                -Name $username `
+                -Password $securePassword `
+                -ErrorAction Stop
+            }
+
+            Add-LocalGroupMember `
+              -Group "Administrators" `
+              -Member $username `
+              -ErrorAction Stop
+
+            Write-Host "Windows account configured."
+          }
+          catch {
+            Write-Error "Account setup failed. Check password policy and account settings."
+            throw
           }
 
-          Add-LocalGroupMember `
-            -Group "Administrators" `
-            -Member $username `
-            -ErrorAction SilentlyContinue
-
-          Write-Host "### Enabling RDP ###"
+          Write-Host "Enabling Remote Desktop..."
 
           Set-ItemProperty `
             -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
@@ -63,55 +104,66 @@ jobs:
           Set-Service -Name TermService -StartupType Automatic
           Start-Service -Name TermService
 
-          Write-Host "### Installing Tailscale ###"
+          Write-Host "Installing Tailscale..."
 
-          $installer = "$env:TEMP\tailscale-setup.exe"
+          $installer = Join-Path $env:TEMP "tailscale-setup.exe"
 
           Invoke-WebRequest `
             -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" `
-            -OutFile $installer
+            -OutFile $installer `
+            -ErrorAction Stop
 
-          Start-Process `
+          $process = Start-Process `
             -FilePath $installer `
             -ArgumentList "/quiet" `
-            -Wait
+            -Wait `
+            -PassThru
+
+          if ($process.ExitCode -notin @(0, 3010)) {
+            throw "Tailscale installer failed with exit code $($process.ExitCode)."
+          }
 
           $tailscale = "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe"
 
           if (-not (Test-Path $tailscale)) {
-            $tailscale = "${env:ProgramFiles}\Tailscale\tailscale.exe"
+            $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
           }
 
           if (-not (Test-Path $tailscale)) {
-            Write-Error "Tailscale installation failed"
-            exit 2
+            throw "Tailscale executable was not found."
           }
 
-          Write-Host "### Connecting Tailscale ###"
+          Write-Host "Connecting to Tailscale..."
 
           & $tailscale up `
-            --auth-key="${{ secrets.TS_AUTHKEY }}" `
-            --hostname="github-windows-vps"
+            "--auth-key=$authKey" `
+            "--hostname=github-windows-vps"
 
-          Start-Sleep -Seconds 5
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tailscale connection failed."
+          }
 
-          Write-Host "### Tailscale status ###"
-          & $tailscale status
+          $ip = $null
 
-          Write-Host "### Tailscale IP ###"
+          for ($i = 0; $i -lt 10; $i++) {
+            Start-Sleep -Seconds 3
+            $ip = & $tailscale ip -4
 
-          $ip = & $tailscale ip -4
+            if ($LASTEXITCODE -eq 0 -and $ip) {
+              break
+            }
+          }
 
-          Write-Host "Tailscale IPv4: $ip"
+          if (-not $ip) {
+            throw "Could not obtain a Tailscale IPv4 address."
+          }
 
-          Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "WINDOWS VPS READY"
-          Write-Host "=========================================="
+          Write-Host "================================"
+          Write-Host "Windows VPS setup completed."
           Write-Host "Username: $username"
           Write-Host "Tailscale IPv4: $ip"
           Write-Host "RDP port: 3389"
-          Write-Host "=========================================="
+          Write-Host "================================"
 
           while ($true) {
             Start-Sleep -Seconds 60
